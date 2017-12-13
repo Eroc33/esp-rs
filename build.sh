@@ -2,19 +2,23 @@
 
 set -e -u -o pipefail
 
-readonly MRUSTC_VER='bffed50'
-readonly SDK_VER='5b92569'
+readonly MRUSTC_VER='f35465d'
+readonly SDK_VER='79e5d4c'
 
 readonly INSTALL_DIR="${HOME}/.esp-rs"
 readonly MRUSTC_DIR="${INSTALL_DIR}/mrustc"
-readonly SDK_ROOT="${INSTALL_DIR}/esp8266-arduino"
-readonly TOOLCHAIN_ROOT="${HOME}/.platformio/packages/toolchain-xtensa"
+readonly SDK_ROOT="${INSTALL_DIR}/esp32-arduino"
+readonly TOOLCHAIN_ROOT="${HOME}/.platformio/packages/toolchain-xtensa32"
 readonly PROJECT_DIR="${PWD}"
 
 function main() {
     if [[ "${1:-}" == '--install' ]]; then
         install_toolchain
         exit
+    elif [[ "${1:-}" == '--check' ]]; then
+	init_project
+	clang_check
+	exit
     elif ! (
         rustup --version \
         && bindgen --version \
@@ -49,7 +53,7 @@ function install_toolchain() {
     fi
     if ! platformio --version &>/dev/null; then
         echo 'Installing platformio...'
-        pip install platformio
+        pip2 install platformio
     fi
     if ! [[ -d "${INSTALL_DIR}" ]]; then
         mkdir "${INSTALL_DIR}"
@@ -58,10 +62,10 @@ function install_toolchain() {
     checkout_git_revision 'https://github.com/thepowersgang/mrustc.git' "${MRUSTC_VER}" "${MRUSTC_DIR}" 'mrustc'
     echo "Building mrustc/minicargo@${MRUSTC_VER}"
     ( cd "${MRUSTC_DIR}" && make RUSTCSRC && make -f minicargo.mk )
-    checkout_git_revision 'https://github.com/esp8266/Arduino.git' "${SDK_VER}" "${SDK_ROOT}" 'ESP8266 Arduino SDK'
+    checkout_git_revision 'https://github.com/espressif/arduino-esp32.git' "${SDK_VER}" "${SDK_ROOT}" 'ESP32 Arduino SDK'
     if ! [[ -d "${TOOLCHAIN_ROOT}" ]]; then
-        echo 'Installing PlatformIO ESP8266 Arduino SDK...'
-        platformio platform install espressif8266
+        echo 'Installing PlatformIO ESP32 Arduino SDK...'
+        platformio platform install espressif32
     fi
 }
 
@@ -84,7 +88,7 @@ function checkout_git_revision() {
 function init_project() {
     if ! [[ -e platformio.ini ]]; then
         echo 'Initializing PlatformIO project...'
-        platformio init -b nodemcuv2
+        platformio init -b featheresp32
     fi
     if ! [[ -e Cargo.toml ]]; then
         echo 'Initializing Cargo project...'
@@ -191,6 +195,7 @@ EOF
         python2 - <(platformio run -t idedata) <<'EOF'
 import json
 import sys
+import re
 
 with open(sys.argv[1]) as input:
     for line in input:
@@ -198,9 +203,12 @@ with open(sys.argv[1]) as input:
             data = json.loads(line)
             for include in data['includes']:
                 print '-I' + include
-            for flag in data['cxx_flags'].split():
-                if flag[:2] != '-m':
-                    print flag
+	    for flag in re.split('(?<!\\\\) ').split(data['cxx_flags']):
+                if flag == '-fstrict-volatile-bitfields':
+                    continue
+                if flag[:2] == '-m':
+                   continue
+                print flag
             break
 EOF
     )
@@ -220,14 +228,60 @@ EOF
               && grep '^#include ' "${PROJECT_DIR}/src/main.ino" \
                   | grep -vF "${GENERATED_C_SRC}" ) \
            -- \
+           -v \
+	   -std=c++11 \
            -x c++ \
            -nostdinc \
            -m32 \
-           -I"${TOOLCHAIN_ROOT}/xtensa-lx106-elf/include/c++/4.8.2" \
-           -I"${TOOLCHAIN_ROOT}/xtensa-lx106-elf/include/c++/4.8.2/xtensa-lx106-elf" \
-           -Itools/sdk/libc/xtensa-lx106-elf/include \
+           -I"${TOOLCHAIN_ROOT}/xtensa-esp32-elf/include/c++/5.2.0" \
+           -I"${TOOLCHAIN_ROOT}/xtensa-esp32-elf/include/c++/5.2.0/xtensa-esp32-elf" \
+           -Itools/sdk/libc/xtensa-esp32-elf/include \
            "${extra_args[@]}" )
     # TODO: Figure out how to automatically derive the hardcoded -I flags above
+}
+
+function clang_check(){
+    # Use platformio to get compiler flags and include dirs.
+
+    local extra_args=()
+    readarray -t extra_args < <(
+        python2 - <(platformio run -t idedata) <<'EOF'
+import json
+import sys
+import re
+
+with open(sys.argv[1]) as input:
+    for line in input:
+        if line.startswith('{'):
+            data = json.loads(line)
+            for include in data['includes']:
+                print '-I' + include
+	    for flag in re.split('(?<!\\\\) ').split(data['cxx_flags']):
+                if flag == '-fstrict-volatile-bitfields':
+                    continue
+                if flag[:2] == '-m':
+                   continue
+                print flag
+            break
+EOF
+    )
+
+    ( cd "${SDK_ROOT}" && \
+        set -x &&
+        clang \
+	   -fsyntax-only \
+           <( echo '#include <Esp.h>' \
+              && grep '^#include ' "${PROJECT_DIR}/src/main.ino" \
+                  | grep -vF "${GENERATED_C_SRC}" ) \
+           -v \
+           -x c++ \
+           -nostdinc \
+           -m32 \
+           -I"${TOOLCHAIN_ROOT}/xtensa-esp32-elf/include/c++/5.2.0" \
+           -I"${TOOLCHAIN_ROOT}/xtensa-esp32-elf/include/c++/5.2.0/xtensa-esp32-elf" \
+           -Itools/sdk/libc/xtensa-esp32-elf/include \
+	   "${extra_args[@]}"
+    )
 }
 
 
